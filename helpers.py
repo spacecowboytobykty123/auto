@@ -74,6 +74,7 @@ def findErrorsTable(soup):
         print(f"Error finding errors table: {e}")
         return None
 
+
 def load_error_mapping(filepath):
     error_mapping = {}
     with open(filepath, 'r', encoding='utf-8') as file:
@@ -92,6 +93,70 @@ def find_error_owner(error_message, error_mapping):
         if error_text in error_message:
             return owner
     return "Неизвестно"
+
+
+def getDeadlineFromMainTable(soup):
+    """
+    Find the deadline from the main properties table with "Основные свойства заявки" header.
+    """
+    try:
+        # Look for the text "Основные свойства заявки"
+        elements = soup.find_all('b')
+
+        for element in elements:
+            if element and 'Основные свойства заявки' in element.get_text():
+                # Found the target element, now find the next table
+                table = element.find_next('table')
+                if table:
+                    # Look for deadline column in the header row
+                    rows = table.find_all('tr')
+                    if len(rows) >= 2:  # Need header + data row
+                        header_row = rows[0]
+                        data_row = rows[1]
+
+                        header_cells = header_row.find_all(['td', 'th'])
+                        data_cells = data_row.find_all(['td', 'th'])
+
+                        # Find deadline column index
+                        deadline_index = -1
+                        for i, cell in enumerate(header_cells):
+                            if 'deadline' in cell.get_text(strip=True).lower():
+                                deadline_index = i
+                                break
+
+                        # Get deadline value
+                        if deadline_index != -1 and deadline_index < len(data_cells):
+                            deadline_value = data_cells[deadline_index].get_text(strip=True)
+                            if deadline_value:
+                                return deadline_value
+                break
+
+        return None
+    except Exception as e:
+        print(f"Error finding deadline: {e}")
+        return None
+
+
+def checkStatusDeadline(status_create_date, deadline):
+    """
+    Check if status was created before deadline.
+    """
+    try:
+        if not status_create_date or not deadline:
+            return False
+
+        # Skip non-date entries like "currentState"
+        if not status_create_date.replace('-', '').replace(':', '').replace('.', '').replace(' ', '').isdigit():
+            return False
+
+        # Parse both dates
+        status_date = datetime.strptime(status_create_date, "%Y-%m-%d %H:%M:%S.%f")
+        deadline_date = datetime.strptime(deadline, "%Y-%m-%d %H:%M:%S.%f")
+
+        return status_date <= deadline_date
+    except Exception as e:
+        print(f"Error checking status deadline: {e}")
+        return False
 
 
 def checkTechnicalErrors(soup):
@@ -139,7 +204,6 @@ def checkTechnicalErrors(soup):
                     error_messages.append(last_error)
 
         # Format error messages
-        # тут текст ошибки
         if error_messages:
             result = "Однако ошибка - " + error_messages[0] + " . "
             for additional_error in error_messages[1:]:
@@ -151,31 +215,35 @@ def checkTechnicalErrors(soup):
         return f"Ошибка при проверке технических ошибок: {e}"
 
 
-def analyzeStatusSequence(historyTable):
+def analyzeStatusSequence(historyTable, soup):
     """
     Analyze the sequence of statuses and return appropriate conclusion text.
     """
     changesTable = historyTable[4]
     changesTrs = changesTable.find_all("tr")
 
-    # Extract all statuses in chronological order (skip header row)
+    # Extract all statuses with their create dates in chronological order (skip header row)
     statuses = []
+    status_dates = []
+
     for tr in changesTrs[1:]:  # Skip header row
         changesTds = tr.find_all("td")
         if len(changesTds) > 6:  # Make sure we have enough columns
             status = changesTds[6].get_text(strip=True)  # newStatus column
+            create_date = changesTds[2].get_text(strip=True) if len(changesTds) > 2 else ""  # createDate column
             if status:  # Only add non-empty statuses
                 statuses.append(status)
+                status_dates.append(create_date)
 
     if not statuses:
         return "Нет данных о статусах"
 
-    # Get the last status
-    last_status = statuses[-1]
-
     # Count occurrences of each status type
     accepted_count = statuses.count('ACCEPTED')
     launched_count = statuses.count('LAUNCHED')
+
+    # Get deadline from main table
+    deadline = getDeadlineFromMainTable(soup)
 
     # Check for priority statuses (STARTED, FINISHED, READY, HANDED, CANCELED)
     # These override all previous logic
@@ -185,19 +253,45 @@ def analyzeStatusSequence(historyTable):
     for status in reversed(statuses):  # Check from last to first
         if status in priority_statuses:
             if status == 'STARTED':
-                return "ГУ на исполнении. Рассмотреть на стороне ГО."
+                return "ГУ на исполнении"
             elif status in ['FINISHED', 'READY', 'HANDED']:
-                return "ГУ оказана несвоевременно. Рассмотреть на стороне ГО."
+                # Find the FIRST occurrence of any final status for deadline checking
+                first_final_index = -1
+                for i, s in enumerate(statuses):
+                    if s in ['FINISHED', 'READY', 'HANDED']:
+                        first_final_index = i
+                        break
+
+                if first_final_index != -1:
+                    status_create_date = status_dates[first_final_index] if first_final_index < len(
+                        status_dates) else ""
+
+                    if deadline and status_create_date:
+                        is_on_time = checkStatusDeadline(status_create_date, deadline)
+                        if is_on_time:
+                            return "ГУ оказана своевременно. "
+                        else:
+                            return "ГУ оказана несвоевременно. "
+                    else:
+                        return "ГУ завершена (не удалось проверить сроки)"
+                else:
+                    return "ГУ завершена"
             elif status == 'CANCELED':
-                return "ГУ отменена."
+                return "ГУ отменена"
             break
 
     # Logic for ACCEPTED and LAUNCHED statuses only
     # (only applies if no priority statuses were found)
 
+    # NEW: Check for ACCEPTED -> LAUNCHED -> ACCEPTED pattern
+    if len(statuses) >= 3:
+        last_three = statuses[-3:]
+        if last_three == ['ACCEPTED', 'LAUNCHED', 'ACCEPTED']:
+            return "ГУ не доставлена до исполнителя"
+
     # Case: Only one ACCEPTED status
     if accepted_count == 1 and launched_count == 0:
-        return "ГУ принята от заявителя. Рассмотреть на стороне ГО."
+        return "ГУ принята от заявителя"
 
     # Case: Two consecutive ACCEPTED statuses with no LAUNCHED
     elif accepted_count == 2 and launched_count == 0:
@@ -205,7 +299,7 @@ def analyzeStatusSequence(historyTable):
 
     # Case: Two ACCEPTED and one LAUNCHED afterwards
     elif accepted_count == 2 and launched_count == 1:
-        return "ГУ на исполнении. Рассмотреть на стороне ГО"
+        return "ГУ на исполнении"
 
     # Case: One ACCEPTED and one LAUNCHED
     elif accepted_count == 1 and launched_count == 1:
@@ -228,13 +322,33 @@ def analyzeFullApplication(soup):
             return "Ошибка: недостаточно таблиц в HTML"
 
         # Get the basic conclusion from status analysis
-        basic_conclusion = analyzeStatusSequence(historyTable)
+        basic_conclusion = analyzeStatusSequence(historyTable, soup)
 
         # Check for technical errors
         error_info = checkTechnicalErrors(soup)
 
-        # Combine conclusion with error information
-        final_conclusion = basic_conclusion + error_info
+        # Determine if we should add "Рассмотреть на стороне ГО."
+        # Only add if there are NO technical errors AND conclusion needs it
+        should_add_go_review = False
+
+        if not error_info:  # No technical errors
+            conclusions_needing_go_review = [
+                "ГУ принята от заявителя",
+                "ГУ на исполнении",
+                "ГУ оказана несвоевременно"
+            ]
+
+            if basic_conclusion in conclusions_needing_go_review:
+                should_add_go_review = True
+
+        # Build final conclusion
+        final_conclusion = basic_conclusion
+
+        if should_add_go_review:
+            final_conclusion += ". Рассмотреть на стороне ГО."
+
+        # Add error information if present
+        final_conclusion += error_info
 
         return final_conclusion
 
