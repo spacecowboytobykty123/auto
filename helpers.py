@@ -205,9 +205,9 @@ def checkTechnicalErrors(soup):
 
         # Format error messages
         if error_messages:
-            result = ". Однако ошибка - " + error_messages[0] + " . "
+            result = ". Однако ошибка - " + error_messages[0] + " ."
             for additional_error in error_messages[1:]:
-                result += "А также ошибка - " + additional_error + " . "
+                result += "А также ошибка - " + additional_error + " ."
             return result
 
         return ""
