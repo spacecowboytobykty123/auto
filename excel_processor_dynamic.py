@@ -112,6 +112,7 @@ def get_id_with_leading_zeros(value):
     return str_value
 
 
+
 def process_excel_with_dynamic_fetch(excel_file_path, output_file_path=None):
     """
     Process Excel file by fetching HTML for each application ID dynamically.
@@ -215,11 +216,10 @@ def process_excel_with_dynamic_fetch(excel_file_path, output_file_path=None):
         if formatting_preserved:
             print("✓ Оригинальное форматирование сохранено")
         else:
-            print("⚠ Форматирование не сохранено")
+            print("⚠️ Форматирование не сохранено")
 
     except Exception as e:
         print(f"Ошибка сохранения файла: {e}")
-
 
 def main():
     excel_file = "Павлодарская область_Апрель_75.xlsx"
@@ -227,6 +227,9 @@ def main():
 
     print("=== ОБРАБОТКА EXCEL С ДИНАМИЧЕСКИМ ПОЛУЧЕНИЕМ HTML ===")
     process_excel_with_dynamic_fetch(excel_file, output_file)
+
+
+
 
 
 if __name__ == "__main__":

@@ -205,7 +205,7 @@ def checkTechnicalErrors(soup):
 
         # Format error messages
         if error_messages:
-            result = "Однако ошибка - " + error_messages[0] + " . "
+            result = ". Однако ошибка - " + error_messages[0] + " . "
             for additional_error in error_messages[1:]:
                 result += "А также ошибка - " + additional_error + " . "
             return result
@@ -269,9 +269,9 @@ def analyzeStatusSequence(historyTable, soup):
                     if deadline and status_create_date:
                         is_on_time = checkStatusDeadline(status_create_date, deadline)
                         if is_on_time:
-                            return "ГУ оказана своевременно. "
+                            return "ГУ оказана своевременно"
                         else:
-                            return "ГУ оказана несвоевременно. "
+                            return "ГУ оказана несвоевременно"
                     else:
                         return "ГУ завершена (не удалось проверить сроки)"
                 else:
