@@ -356,6 +356,9 @@ def analyzeFullApplication(soup):
         return f"Ошибка анализа: {str(e)}"
 
 
+def analyzeDBStatuses(statuses):
+    pass
+
 def printStatusHistory(historyTable):
     """
     Print the status history for debugging purposes.
