@@ -38,34 +38,49 @@ def fetch_html_with_timeout(url, timeout=5):
         return None
 
 
-def analyze_application_from_html(html_content):
+def analyze_application_from_html(html_content, return_deadline=False):
     try:
         soup = BeautifulSoup(html_content, "html.parser")
-        conclusion = helpers.analyzeFullApplication(soup)
-        return conclusion
+        result = helpers.analyzeFullApplication(soup, return_deadline=return_deadline)
+        return result  # будет кортеж или строка — в зависимости от return_deadline
     except Exception as e:
-        return f"Ошибка анализа HTML: {e}"
+        return (f"Ошибка анализа HTML: {e}", None) if return_deadline else f"Ошибка анализа HTML: {e}"
 
 
 def query_postgres_by_app_id(app_id, conn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT i.id, i.requestnumber, s.name AS status_name, h.created_at
+                SELECT i.id, i.requestnumber, h.status AS status_name, h.creation_date
                 FROM history.application_info i
                 LEFT JOIN history.status_history h ON h.applicationinfo_id = i.id
                 LEFT JOIN history.status_go s ON s.id = h.statusgo_id
                 WHERE i.requestnumber = %s
-                ORDER BY h.created_at ASC;            """, (app_id,))
-            result = cur.fetchone()
-            if result:
-                status = result[2] or "Статус отсутствует"
-                date = result[3].strftime('%Y-%m-%d %H:%M') if result[3] else "Дата отсутствует"
-                return f"Статус: {status}, Дата: {date}"
+                ORDER BY h.creation_date DESC;
+            """, (app_id,))
+
+            results = cur.fetchall()  # Получаем все строки
+
+            if results:
+                # Берём первую строку — последнюю по времени (DESC)
+                first_result = results[0]
+                status = first_result[2] or "Статус отсутствует"
+                # TODO: обработать PAYED WAITING FOR PAYMENT
+                date = first_result[3].strftime('%Y-%m-%d %H:%M:%S.%f') if first_result[3] else "Дата отсутствует"
+
+                # Анализируем статус
+                dbConclusion = helpers.analyzeDBStatuses(status)
+
+                # Если тебе нужно вернуть все результаты — можно так:
+                # return dbConclusion, date, results
+                if helpers.hasTechErrors(results):
+                    return dbConclusion + ". Есть TECH_ERROR", date
+                return dbConclusion, date
             else:
-                return "Нет истории по номеру заявления"
+                return "Нет истории по номеру заявления", ""
+
     except Exception as e:
-        return f"Ошибка запроса: {e}"
+        return f"Ошибка запроса: {e}", ""
 
 
 def preserve_excel_formatting(original_file, output_file, df_updated, sheet_index):
@@ -135,7 +150,7 @@ def process_html_sheet(file_path, output_path):
 
         html_content = fetch_html_with_timeout(url, timeout=5)
         if html_content:
-            conclusion = analyze_application_from_html(html_content)
+            conclusion = analyze_application_from_html(html_content, return_deadline=False)
             df.at[index, comment_col] = conclusion
             successful_count += 1
             print(f"✓ Успешно: {conclusion}")
@@ -196,10 +211,57 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             continue
 
         print(f"\n[{index + 1}/{len(df)}] Обработка PEP-записи: ID={app_id}, Номер={pep_id}")
-        html_content = fetch_html_with_timeout(f"http://192.168.130.100/csp/iiscon/isc.util.About.cls?Action=4&appId={app_id}")
-        html_conclusion = analyze_application_from_html(html_content) if html_content else "Ошибка загрузки HTML"
-        db_conclusion = query_postgres_by_app_id(pep_id, conn)
-        df.at[index, comment_col] = f"HTML: {html_conclusion} | БД: {db_conclusion}"
+
+        html_content = fetch_html_with_timeout(
+            f"http://192.168.130.100/csp/iiscon/isc.util.About.cls?Action=4&appId={app_id}")
+
+        if html_content:
+            html_conclusion, deadline = analyze_application_from_html(html_content, return_deadline=True)
+        else:
+            html_conclusion, deadline = "Ошибка загрузки HTML", None
+
+        # ✅ Если сразу нужно остановить и перейти к следующей записи
+        if html_conclusion in [
+            "ГУ оказана несвоевременно.",
+            "ГУ оказана несвоевременно. Рассмотреть на стороне ГО."
+        ]:
+            df.at[index, comment_col] = html_conclusion
+            print(f"✓ Успешно: {html_conclusion}")
+            successful_count += 1
+            time.sleep(0.2)
+            continue  # ⬅️ Переход на следующую строку DataFrame
+
+        if not str(pep_id).startswith(('0', '1')):
+            df.at[index, comment_col] = html_conclusion
+            print(f"✓ Успешно: {html_conclusion}")
+            successful_count += 1
+            time.sleep(0.2)
+            continue  # ⬅️ Переход на следующую строку DataFrame
+
+        db_status, finishDate = query_postgres_by_app_id(pep_id, conn)
+
+        if db_status == html_conclusion:
+            df.at[index, comment_col] = html_conclusion
+            print(f"✓ Успешно: {html_conclusion}")
+        elif db_status in ["FINISHED", "CANCELLED", "APPROVED"]:
+            print(f"db date {finishDate}")
+            print(f"shina deadline {deadline}")
+            if helpers.checkStatusDeadline(finishDate, deadline):
+                conc = "ГУ оказана своевременно."
+                if html_conclusion != "ГУ оказана с нарушением срока." or "ГУ оказана с нарушением срока. Рассмотреть на стороне ГО.":
+                    conc += " Однако статус исполнения отсутствует в ИИС ЦОН."
+                df.at[index, comment_col] = conc
+                print(conc)
+            else:
+                conc = "ГУ оказана с несвоевременно. Рассмотреть на стороне ГО."
+                if html_conclusion != "ГУ оказана с нарушением срока." or "ГУ оказана с нарушением срока. Рассмотреть на стороне ГО.":
+                    conc += " Однако статус исполнения отсутствует в ИИС ЦОН."
+                df.at[index, comment_col] = conc
+                print(conc)
+        else:
+            df.at[index, comment_col] = f"HTML: {html_conclusion} | БД: {db_status}"
+            print(f"HTML: {html_conclusion} | БД: {db_status}")
+
         successful_count += 1
         time.sleep(0.2)
 
@@ -223,7 +285,7 @@ def process_combined_excel_pipeline(file_path, output_path):
             dbname="egov",
             user="alisher_ibrayev",
             password="ASTkazkorp2010!@#",
-            sslmode="require"  # или "disable", если точно без SSL
+            sslmode="disable"  # или "disable", если точно без SSL
         )
         process_pep_sheet_with_full_analysis(file_path, output_path, conn)
         conn.close()

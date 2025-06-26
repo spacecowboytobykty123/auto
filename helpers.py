@@ -215,6 +215,7 @@ def checkTechnicalErrors(soup):
         return f"Ошибка при проверке технических ошибок: {e}"
 
 
+
 def analyzeStatusSequence(historyTable, soup):
     """
     Analyze the sequence of statuses and return appropriate conclusion text.
@@ -253,7 +254,7 @@ def analyzeStatusSequence(historyTable, soup):
     for status in reversed(statuses):  # Check from last to first
         if status in priority_statuses:
             if status == 'STARTED':
-                return "ГУ на исполнении"
+                return "ГУ на исполнении", deadline
             elif status in ['FINISHED', 'READY', 'HANDED']:
                 # Find the FIRST occurrence of any final status for deadline checking
                 first_final_index = -1
@@ -269,15 +270,15 @@ def analyzeStatusSequence(historyTable, soup):
                     if deadline and status_create_date:
                         is_on_time = checkStatusDeadline(status_create_date, deadline)
                         if is_on_time:
-                            return "ГУ оказана своевременно"
+                            return "ГУ оказана своевременно", deadline
                         else:
-                            return "ГУ оказана несвоевременно"
+                            return "ГУ оказана несвоевременно", deadline
                     else:
-                        return "ГУ завершена (не удалось проверить сроки)"
+                        return "ГУ завершена (не удалось проверить сроки)", deadline
                 else:
-                    return "ГУ завершена"
+                    return "ГУ завершена", deadline
             elif status == 'CANCELED':
-                return "ГУ отменена"
+                return "ГУ отменена", deadline
             break
 
     # Logic for ACCEPTED and LAUNCHED statuses only
@@ -287,30 +288,30 @@ def analyzeStatusSequence(historyTable, soup):
     if len(statuses) >= 3:
         last_three = statuses[-3:]
         if last_three == ['ACCEPTED', 'LAUNCHED', 'ACCEPTED']:
-            return "ГУ не доставлена до исполнителя"
+            return "ГУ не доставлена до исполнителя", deadline
 
     # Case: Only one ACCEPTED status
     if accepted_count == 1 and launched_count == 0:
-        return "ГУ принята от заявителя"
+        return "ГУ принята от заявителя", deadline
 
     # Case: Two consecutive ACCEPTED statuses with no LAUNCHED
     elif accepted_count == 2 and launched_count == 0:
-        return "Оператор цон не провел через накопитель Б"
+        return "Оператор цон не провел через накопитель Б", deadline
 
     # Case: Two ACCEPTED and one LAUNCHED afterwards
     elif accepted_count == 2 and launched_count == 1:
-        return "ГУ на исполнении"
+        return "ГУ на исполнении", deadline
 
     # Case: One ACCEPTED and one LAUNCHED
     elif accepted_count == 1 and launched_count == 1:
-        return "Рассмотреть на SHEP"
+        return "Рассмотреть на SHEP", deadline
 
     # Default case for other combinations
     else:
-        return f"Неопределенная последовательность статусов: {' -> '.join(statuses)}"
+        return f"Неопределенная последовательность статусов: {' -> '.join(statuses)}", deadline
 
 
-def analyzeFullApplication(soup):
+def analyzeFullApplication(soup, return_deadline=False):
     """
     Complete analysis including both status sequence and technical errors.
     Returns the final conclusion with error information if present.
@@ -319,10 +320,10 @@ def analyzeFullApplication(soup):
         historyTable = soup.find_all("table")
 
         if len(historyTable) < 5:
-            return "Ошибка: недостаточно таблиц в HTML"
+            return ("Ошибка: недостаточно таблиц в HTML", None) if return_deadline else "Ошибка: недостаточно таблиц в HTML"
 
         # Get the basic conclusion from status analysis
-        basic_conclusion = analyzeStatusSequence(historyTable, soup)
+        basic_conclusion, deadline = analyzeStatusSequence(historyTable, soup)
 
         # Check for technical errors
         error_info = checkTechnicalErrors(soup)
@@ -350,14 +351,28 @@ def analyzeFullApplication(soup):
         # Add error information if present
         final_conclusion += error_info
 
-        return final_conclusion
+        return (final_conclusion, deadline) if return_deadline else final_conclusion
 
     except Exception as e:
-        return f"Ошибка анализа: {str(e)}"
+        result = f"Ошибка анализа: {str(e)}"
+        return (result, None) if return_deadline else result
 
 
-def analyzeDBStatuses(statuses):
-    pass
+def analyzeDBStatuses(lastStatus):
+    # lastStatus = statuses[-1]
+    if lastStatus == "IN_PROCESSING":
+        return "ГУ на исполнении. Рассмотреть на стороне ГО."
+    elif lastStatus == "SENT" or "ACCEPTED":
+        return "Рассмотреть на SHEP"
+    elif lastStatus in ["COMPLETED", "CANCELLED", "APPROVED"]:
+        return "FINISHED"
+    elif lastStatus == "CREATED":
+        return "REGISTERED"
+    else:
+        return "Не нашли соответствия"
+
+
+
 
 def printStatusHistory(historyTable):
     """
@@ -380,3 +395,10 @@ def printStatusHistory(historyTable):
             else:
                 print(f"{i:<3} {date:<25} {old_status:<15} {new_status:<15}")
     print("=" * 65)
+
+
+def hasTechErrors(statusList):
+    for status in statusList:
+        if status[2] == "TECH_ERROR":
+            return True
+    return False
