@@ -55,7 +55,7 @@ def query_postgres_by_app_id(app_id, conn):
                 FROM history.application_info i
                 LEFT JOIN history.status_history h ON h.applicationinfo_id = i.id
                 LEFT JOIN history.status_go s ON s.id = h.statusgo_id
-                WHERE i.requestnumber = %s
+                WHERE i.requestnumber  = %s
                 ORDER BY h.creation_date DESC;
             """, (app_id,))
 
@@ -64,7 +64,17 @@ def query_postgres_by_app_id(app_id, conn):
             if results:
                 # Берём первую строку — последнюю по времени (DESC)
                 first_result = results[0]
+                indexList = len(first_result) - 1
                 status = first_result[2] or "Статус отсутствует"
+                if status == "WAITING_FOR_PAYMENT" or "PAYED":
+                    indexList -= 1
+                    while indexList >= 0:
+                        tempStatus = first_result[indexList]
+                        if tempStatus[2] != "WAITING_FOR_PAYMENT" or "PAYED":
+                            first_result = results[1]
+                            status = first_result[0]
+                            if tempStatus[2] == "CREATED":
+                                return "Created после оплаты, отработать", ''
                 # TODO: обработать PAYED WAITING FOR PAYMENT
                 date = first_result[3].strftime('%Y-%m-%d %H:%M:%S.%f') if first_result[3] else "Дата отсутствует"
 
@@ -243,6 +253,11 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
         if db_status == html_conclusion:
             df.at[index, comment_col] = html_conclusion
             print(f"✓ Успешно: {html_conclusion}")
+
+        elif db_status == "Рассмотреть на SHEP" and html_conclusion in ["ГУ на исполнении. ", "ГУ на исполнении. Рассмотреть на стороне ГО."]:
+            conc = "ГУ на исполнении. Рассмотреть на стороне ГО."
+            df.at[index, comment_col] = conc
+            print(conc)
         elif db_status in ["FINISHED", "CANCELLED", "APPROVED"]:
             print(f"db date {finishDate}")
             print(f"shina deadline {deadline}")
@@ -276,18 +291,19 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
     print(f"Результаты сохранены в: {output_path}")
 
 
-def process_combined_excel_pipeline(file_path, output_path):
+def process_combined_excel_pipeline(file_path, output_path, db_config):
     process_html_sheet(file_path, output_path)
     try:
         conn = psycopg2.connect(
-            host="192.168.175.27",
-            port=5432,
-            dbname="egov",
-            user="alisher_ibrayev",
-            password="ASTkazkorp2010!@#",
-            sslmode="disable"  # или "disable", если точно без SSL
+            host=db_config["host"],
+            port=db_config["port"],
+            dbname=db_config["dbname"],
+            user=db_config["user"],
+            password=db_config["password"],
+            sslmode="disable"
         )
         process_pep_sheet_with_full_analysis(file_path, output_path, conn)
         conn.close()
     except Exception as e:
         print(f"Ошибка подключения к базе данных: {e}")
+

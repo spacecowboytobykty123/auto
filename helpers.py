@@ -362,7 +362,7 @@ def analyzeDBStatuses(lastStatus):
     # lastStatus = statuses[-1]
     if lastStatus == "IN_PROCESSING":
         return "ГУ на исполнении. Рассмотреть на стороне ГО."
-    elif lastStatus == "SENT" or "ACCEPTED":
+    elif lastStatus == "SENT":
         return "Рассмотреть на SHEP"
     elif lastStatus in ["COMPLETED", "CANCELLED", "APPROVED"]:
         return "FINISHED"
