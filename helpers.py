@@ -95,6 +95,13 @@ def find_error_owner(error_message, error_mapping):
     return "Неизвестно"
 
 
+def parse_datetime_safe(date_str):
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S.%f")
+    except ValueError:
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+
+
 def getDeadlineFromMainTable(soup):
     """
     Find the deadline from the main properties table with "Основные свойства заявки" header.
@@ -150,8 +157,8 @@ def checkStatusDeadline(status_create_date, deadline):
             return False
 
         # Parse both dates
-        status_date = datetime.strptime(status_create_date, "%Y-%m-%d %H:%M:%S.%f")
-        deadline_date = datetime.strptime(deadline, "%Y-%m-%d %H:%M:%S.%f")
+        status_date = parse_datetime_safe(status_create_date)
+        deadline_date = parse_datetime_safe(deadline)
 
         return status_date <= deadline_date
     except Exception as e:

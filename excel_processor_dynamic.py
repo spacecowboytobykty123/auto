@@ -3,8 +3,11 @@ import time
 import psycopg2
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
+import tkinter.messagebox as messagebox  # если не импортировано
 import requests
 import helpers
+from openpyxl.styles import Alignment
+
 
 
 def get_id_with_leading_zeros(value):
@@ -49,6 +52,7 @@ def analyze_application_from_html(html_content, return_deadline=False):
 
 def query_postgres_by_app_id(app_id, conn):
     try:
+        print(f"🔍 Выполняется SQL-запрос для app_id: {app_id}")
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT i.id, i.requestnumber, h.status AS status_name, h.creation_date
@@ -60,21 +64,30 @@ def query_postgres_by_app_id(app_id, conn):
             """, (app_id,))
 
             results = cur.fetchall()  # Получаем все строки
+            print(f"✅ Получено {len(results)} строк из БД")
 
             if results:
-                # Берём первую строку — последнюю по времени (DESC)
                 first_result = results[0]
-                indexList = len(first_result) - 1
                 status = first_result[2] or "Статус отсутствует"
-                if status == "WAITING_FOR_PAYMENT" or "PAYED":
-                    indexList -= 1
-                    while indexList >= 0:
-                        tempStatus = first_result[indexList]
-                        if tempStatus[2] != "WAITING_FOR_PAYMENT" or "PAYED":
-                            first_result = results[1]
-                            status = first_result[0]
-                            if tempStatus[2] == "CREATED":
-                                return "Created после оплаты, отработать", ''
+
+                # Если текущий статус — оплата, ищем предыдущий не-оплатный статус
+                if status in ["PAYED", "WAITING_FOR_PAYMENT"]:
+                    index = 1  # начинаем с элемента после first_result
+                    while index < len(results):
+                        temp_status = results[index][2]
+                        if temp_status not in ["PAYED", "WAITING_FOR_PAYMENT"]:
+                            status = temp_status or "Статус отсутствует"
+                            break
+                        index += 1
+                    else:
+                        # если все статусы — оплатные
+                        status = "Статус перед оплатой не найден"
+
+            #     print("Статус:", status)
+            # else:
+            #     status = "Нет результатов"
+
+
                 # TODO: обработать PAYED WAITING FOR PAYMENT
                 date = first_result[3].strftime('%Y-%m-%d %H:%M:%S.%f') if first_result[3] else "Дата отсутствует"
 
@@ -93,10 +106,13 @@ def query_postgres_by_app_id(app_id, conn):
         return f"Ошибка запроса: {e}", ""
 
 
+
 def preserve_excel_formatting(original_file, output_file, df_updated, sheet_index):
     try:
         wb = load_workbook(original_file)
         ws = wb.worksheets[sheet_index]
+
+        # Находим индекс столбца с комментариями
         comment_col_index = None
         for col_idx, cell in enumerate(ws[1], 1):
             if cell.value and 'Комментарий АО НИТ' in str(cell.value):
@@ -104,13 +120,25 @@ def preserve_excel_formatting(original_file, output_file, df_updated, sheet_inde
                 break
         if comment_col_index is None:
             return False
+
+        # Создаём объект с wrapText
+        wrap_alignment = Alignment(wrap_text=True)
+
         for row_idx in range(2, len(df_updated) + 2):
             df_row_idx = row_idx - 2
             comment_value = df_updated.iloc[df_row_idx]['Комментарий АО НИТ']
+
             if pd.notna(comment_value) and comment_value != '':
-                ws.cell(row=row_idx, column=comment_col_index).value = comment_value
+                cell = ws.cell(row=row_idx, column=comment_col_index)
+                cell.value = comment_value
+                cell.alignment = wrap_alignment
+
+                # ✅ ВАЖНО: включаем автоматическую высоту строки
+                ws.row_dimensions[row_idx].height = None
+
         wb.save(output_file)
         return True
+
     except Exception as e:
         print(f"Ошибка сохранения Excel: {e}")
         return False
@@ -182,7 +210,7 @@ def process_html_sheet(file_path, output_path):
     print(f"Результаты сохранены в: {output_path}")
 
 
-def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
+def process_pep_sheet_with_full_analysis(file_path, output_path, db_config):
     try:
         df = pd.read_excel(file_path, sheet_name=2, engine='openpyxl', dtype=str)
     except Exception as e:
@@ -213,12 +241,33 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
 
     successful_count = 0
     failed_count = 0
+    BATCH_SIZE = 100
+    conn = None
 
     for index, row in df.iterrows():
         app_id = row[identifier_col]
         pep_id = row[pep_col]
         if pd.isna(app_id) or pd.isna(pep_id):
             continue
+
+        if index % BATCH_SIZE == 0:
+            if conn:
+                conn.close()
+            try:
+                conn = psycopg2.connect(
+                    host=db_config["host"],
+                    port=db_config["port"],
+                    dbname=db_config["dbname"],
+                    user=db_config["user"],
+                    password=db_config["password"],
+                    sslmode="disable",
+                    connect_timeout=5,
+                    options='-c statement_timeout=5000'
+                )
+                print(f"🔌 Подключение к БД установлено (batch {index // BATCH_SIZE + 1})")
+            except Exception as e:
+                print(f"❌ Ошибка подключения к БД: {e}")
+                conn = None
 
         print(f"\n[{index + 1}/{len(df)}] Обработка PEP-записи: ID={app_id}, Номер={pep_id}")
 
@@ -229,6 +278,9 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             html_conclusion, deadline = analyze_application_from_html(html_content, return_deadline=True)
         else:
             html_conclusion, deadline = "Ошибка загрузки HTML", None
+            df.at[index, comment_col] = html_conclusion
+            print(f"✓ Ошибка: {html_conclusion}")
+            continue
 
         # ✅ Если сразу нужно остановить и перейти к следующей записи
         if html_conclusion in [
@@ -238,15 +290,21 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             df.at[index, comment_col] = html_conclusion
             print(f"✓ Успешно: {html_conclusion}")
             successful_count += 1
-            time.sleep(0.2)
+            time.sleep(0.5)
             continue  # ⬅️ Переход на следующую строку DataFrame
 
         if not str(pep_id).startswith(('0', '1')):
             df.at[index, comment_col] = html_conclusion
             print(f"✓ Успешно: {html_conclusion}")
             successful_count += 1
-            time.sleep(0.2)
+            time.sleep(0.5)
             continue  # ⬅️ Переход на следующую строку DataFrame
+
+        if not conn or conn.closed != 0:
+            df.at[index, comment_col] = "Ошибка подключения к БД"
+            failed_count += 1
+            print("⛔ Пропуск из-за отсутствия соединения")
+            continue
 
         db_status, finishDate = query_postgres_by_app_id(pep_id, conn)
 
@@ -254,7 +312,7 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             df.at[index, comment_col] = html_conclusion
             print(f"✓ Успешно: {html_conclusion}")
 
-        elif db_status == "Рассмотреть на SHEP" and html_conclusion in ["ГУ на исполнении. ", "ГУ на исполнении. Рассмотреть на стороне ГО."]:
+        elif db_status == "Рассмотреть на SHEP" and html_conclusion in ["ГУ на исполнении.", "ГУ на исполнении. Рассмотреть на стороне ГО."]:
             conc = "ГУ на исполнении. Рассмотреть на стороне ГО."
             df.at[index, comment_col] = conc
             print(conc)
@@ -263,13 +321,13 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             print(f"shina deadline {deadline}")
             if helpers.checkStatusDeadline(finishDate, deadline):
                 conc = "ГУ оказана своевременно."
-                if html_conclusion != "ГУ оказана с нарушением срока." or "ГУ оказана с нарушением срока. Рассмотреть на стороне ГО.":
+                if html_conclusion != "ГУ оказана несвоевременно." or "ГУ оказана несвоевременно. Рассмотреть на стороне ГО.":
                     conc += " Однако статус исполнения отсутствует в ИИС ЦОН."
                 df.at[index, comment_col] = conc
                 print(conc)
             else:
-                conc = "ГУ оказана с несвоевременно. Рассмотреть на стороне ГО."
-                if html_conclusion != "ГУ оказана с нарушением срока." or "ГУ оказана с нарушением срока. Рассмотреть на стороне ГО.":
+                conc = "ГУ оказана несвоевременно. Рассмотреть на стороне ГО."
+                if html_conclusion != "ГУ оказана несвоевременно." or "ГУ оказана несвоевременно. Рассмотреть на стороне ГО.":
                     conc += " Однако статус исполнения отсутствует в ИИС ЦОН."
                 df.at[index, comment_col] = conc
                 print(conc)
@@ -278,7 +336,7 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
             print(f"HTML: {html_conclusion} | БД: {db_status}")
 
         successful_count += 1
-        time.sleep(0.2)
+        time.sleep(0.5)
 
     preserved = preserve_excel_formatting(file_path, output_path, df, sheet_index=2)
     if not preserved:
@@ -293,17 +351,21 @@ def process_pep_sheet_with_full_analysis(file_path, output_path, conn):
 
 def process_combined_excel_pipeline(file_path, output_path, db_config):
     process_html_sheet(file_path, output_path)
+
+    # ✅ Подтверждение перед переходом к ПЭП
+    proceed = messagebox.askyesno(
+        "Переход к ПЭП-листу",
+        "HTML-лист успешно обработан.\nХотите продолжить обработку ПЭП-листа с подключением к базе данных?"
+    )
+
+    if not proceed:
+        print("⏹️ Пользователь завершил обработку на этапе HTML.")
+        return  # Просто выходим — HTML уже обработан
+
     try:
-        conn = psycopg2.connect(
-            host=db_config["host"],
-            port=db_config["port"],
-            dbname=db_config["dbname"],
-            user=db_config["user"],
-            password=db_config["password"],
-            sslmode="disable"
-        )
-        process_pep_sheet_with_full_analysis(file_path, output_path, conn)
-        conn.close()
+        # 🔄 Передаём db_config напрямую — подключение будет открыто внутри
+        process_pep_sheet_with_full_analysis(file_path, output_path, db_config)
     except Exception as e:
-        print(f"Ошибка подключения к базе данных: {e}")
+        print(f"❌ Ошибка во время анализа ПЭП: {e}")
+
 

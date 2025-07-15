@@ -9,6 +9,18 @@ import os
 # ✅ Import the unified pipeline function
 from main import process_combined_excel_pipeline
 
+import socket
+
+def check_single_instance():
+    """Prevents multiple instances using socket port lock."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('127.0.0.1', 65432))  # Use a free port
+    except OSError:
+        print("⚠️ Приложение уже запущено.")
+        exit(1)
+
+
 
 class RedirectText:
     def __init__(self, text_widget):
@@ -56,6 +68,7 @@ def select_file(button):
         thread.start()
 
 def main():
+    check_single_instance()
     root = tk.Tk()
     root.title("NITEC: HTML + DB Excel Анализ")
     root.geometry("750x750")
